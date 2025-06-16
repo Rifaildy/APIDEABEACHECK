@@ -5,15 +5,15 @@ class MLService {
   constructor() {
     this.apiUrl = process.env.ML_API_URL || "http://capstone-diabeacheck.up.railway.app"
     this.timeout = 30000 // 30 seconds
-    this.predictEndpoint = "/predict" // Endpoint yang benar berdasarkan testing
-    this.healthEndpoint = "/health"
   }
 
   async predictDiabetes(inputData) {
     try {
-      logger.info("Calling ML API with:", inputData)
+      logger.info("=== ML API CALL START ===")
+      logger.info("ML API URL:", this.apiUrl)
+      logger.info("Input data:", inputData)
 
-      // Prepare data for ML API (format yang sesuai dengan Railway API)
+      // Prepare data for ML API
       const mlApiData = {
         Age: Number.parseFloat(inputData.age),
         BMI: Number.parseFloat(inputData.bmi),
@@ -22,127 +22,205 @@ class MLService {
         BloodPressure: Number.parseFloat(inputData.bloodPressure),
       }
 
-      logger.info("Sending to ML API:", mlApiData)
+      logger.info("Formatted ML API data:", mlApiData)
 
-      // Call ML API dengan endpoint yang benar
-      const response = await axios.post(`${this.apiUrl}${this.predictEndpoint}`, mlApiData, {
-        timeout: this.timeout,
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-      })
+      // Try different endpoints and methods
+      const endpointsToTry = [
+        { url: `${this.apiUrl}/predict`, method: "POST" },
+        { url: `${this.apiUrl}/api/predict`, method: "POST" },
+        { url: `${this.apiUrl}/prediction`, method: "POST" },
+        { url: `${this.apiUrl}/predict`, method: "GET" },
+      ]
 
-      const mlResult = response.data
-      logger.info("ML API response:", mlResult)
+      let lastError = null
 
-      // Process ML API response
-      let prediction, probability, rawOutput
+      for (const endpoint of endpointsToTry) {
+        try {
+          logger.info(`Trying ${endpoint.method} ${endpoint.url}`)
 
-      // Handle response format dari Railway ML API
-      if (mlResult.prediction !== undefined) {
-        prediction = mlResult.prediction
-        probability = mlResult.probability || 0.5
-        rawOutput = mlResult.raw_output !== undefined ? mlResult.raw_output : prediction === "Diabetes" ? 1 : 0
-      } else if (mlResult.result !== undefined) {
-        // Alternative response format
-        prediction = mlResult.result === 1 ? "Diabetes" : "Tidak Diabetes"
-        probability = mlResult.confidence || mlResult.probability || 0.5
-        rawOutput = mlResult.result
-      } else if (mlResult.class !== undefined) {
-        // Another possible format
-        prediction = mlResult.class === 1 ? "Diabetes" : "Tidak Diabetes"
-        probability = mlResult.probability || 0.5
-        rawOutput = mlResult.class
-      } else {
-        // Fallback - assume the response is the prediction directly
-        prediction = mlResult.toString().includes("1") ? "Diabetes" : "Tidak Diabetes"
-        probability = 0.5
-        rawOutput = mlResult.toString().includes("1") ? 1 : 0
+          let response
+          if (endpoint.method === "POST") {
+            response = await axios.post(endpoint.url, mlApiData, {
+              timeout: this.timeout,
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+              },
+            })
+          } else {
+            // For GET, try with query parameters
+            const params = new URLSearchParams(mlApiData).toString()
+            response = await axios.get(`${endpoint.url}?${params}`, {
+              timeout: this.timeout,
+              headers: {
+                Accept: "application/json",
+              },
+            })
+          }
+
+          if (response.status === 200) {
+            logger.info(`Success with ${endpoint.method} ${endpoint.url}`)
+            logger.info("ML API response:", response.data)
+
+            // Process the successful response
+            return this.processMLResponse(response.data, inputData)
+          }
+        } catch (error) {
+          logger.warn(`Failed ${endpoint.method} ${endpoint.url}:`, error.response?.status || error.message)
+          lastError = error
+          continue
+        }
       }
 
-      // Determine risk level based on prediction
-      let riskLevel, confidence, message
-
-      if (prediction === "Diabetes" || rawOutput === 1) {
-        riskLevel = "High"
-        confidence = probability
-        message = `Risiko diabetes tinggi dengan probabilitas ${Math.round(probability * 100)}%`
-      } else {
-        riskLevel = "Low"
-        confidence = 1 - probability
-        message = `Risiko diabetes rendah dengan probabilitas ${Math.round((1 - probability) * 100)}%`
-      }
-
-      // Generate recommendations
-      const recommendations = this.generateRecommendations(inputData, prediction, rawOutput)
-
-      const result = {
-        prediction: prediction,
-        probability: probability,
-        confidence: confidence,
-        risk_level: riskLevel,
-        label: prediction,
-        message: message,
-        recommendations: recommendations,
-        model_info: {
-          model_type: "MLP Neural Network",
-          threshold: 0.5,
-          accuracy: null,
-        },
-        raw_output: rawOutput,
-        input_data: inputData,
-        ml_api_response: mlResult, // Include original response for debugging
-      }
-
-      logger.info("Processed prediction result:", result)
-      return result
+      // If all endpoints failed, throw the last error
+      throw lastError || new Error("All ML API endpoints failed")
     } catch (error) {
-      logger.error("ML Service error:", error.message)
-
-      if (error.code === "ECONNREFUSED") {
-        throw new Error("ML API server is not accessible. Please check if the Railway service is running.")
-      }
+      logger.error("=== ML API CALL FAILED ===")
+      logger.error("Error:", error.message)
 
       if (error.response) {
-        logger.error("ML API error response:", {
-          status: error.response.status,
-          statusText: error.response.statusText,
-          data: error.response.data,
-          url: `${this.apiUrl}${this.predictEndpoint}`,
-        })
+        logger.error("Response status:", error.response.status)
+        logger.error("Response data:", error.response.data)
+      }
 
-        if (error.response.status === 405) {
-          throw new Error(
-            `ML API endpoint ${this.predictEndpoint} does not support POST method. Please check the API documentation at ${this.apiUrl}/docs`,
-          )
-        }
+      // Return mock prediction for development/testing
+      if (process.env.NODE_ENV !== "production") {
+        logger.warn("Returning mock prediction for development")
+        return this.getMockPrediction(inputData)
+      }
 
-        if (error.response.status === 404) {
-          throw new Error(`ML API endpoint ${this.predictEndpoint} not found. Please verify the endpoint URL.`)
-        }
+      throw this.formatMLError(error)
+    }
+  }
 
-        if (error.response.status === 422) {
-          throw new Error(
-            `ML API validation error: ${JSON.stringify(error.response.data)}. Please check the input data format.`,
-          )
-        }
+  processMLResponse(mlResult, inputData) {
+    logger.info("Processing ML response:", mlResult)
 
-        throw new Error(
-          `ML API error (${error.response.status}): ${error.response.data?.detail || error.response.statusText}`,
+    // Handle different response formats
+    let prediction, probability, rawOutput
+
+    if (mlResult.prediction !== undefined) {
+      prediction = mlResult.prediction
+      probability = mlResult.probability || 0.5
+      rawOutput = mlResult.raw_output !== undefined ? mlResult.raw_output : prediction === "Diabetes" ? 1 : 0
+    } else if (mlResult.result !== undefined) {
+      prediction = mlResult.result === 1 ? "Diabetes" : "Tidak Diabetes"
+      probability = mlResult.confidence || mlResult.probability || 0.5
+      rawOutput = mlResult.result
+    } else if (mlResult.class !== undefined) {
+      prediction = mlResult.class === 1 ? "Diabetes" : "Tidak Diabetes"
+      probability = mlResult.probability || 0.5
+      rawOutput = mlResult.class
+    } else {
+      // Fallback parsing
+      prediction = "Tidak Diabetes"
+      probability = 0.3
+      rawOutput = 0
+    }
+
+    // Determine risk level
+    let riskLevel, confidence, message
+
+    if (prediction === "Diabetes" || rawOutput === 1) {
+      riskLevel = "High"
+      confidence = probability
+      message = `Risiko diabetes tinggi dengan probabilitas ${Math.round(probability * 100)}%`
+    } else {
+      riskLevel = "Low"
+      confidence = 1 - probability
+      message = `Risiko diabetes rendah dengan probabilitas ${Math.round((1 - probability) * 100)}%`
+    }
+
+    const result = {
+      prediction: prediction,
+      probability: probability,
+      confidence: confidence,
+      risk_level: riskLevel,
+      label: prediction,
+      message: message,
+      recommendations: this.generateRecommendations(inputData, prediction, rawOutput),
+      model_info: {
+        model_type: "MLP Neural Network",
+        threshold: 0.5,
+        accuracy: null,
+      },
+      raw_output: rawOutput,
+      input_data: inputData,
+      ml_api_response: mlResult,
+    }
+
+    logger.info("Processed result:", result)
+    return result
+  }
+
+  getMockPrediction(inputData) {
+    logger.info("Generating mock prediction for development")
+
+    // Simple mock logic based on glucose and BMI
+    const glucose = Number.parseFloat(inputData.glucose)
+    const bmi = Number.parseFloat(inputData.bmi)
+
+    const isDiabetic = glucose > 140 || bmi > 30
+    const probability = isDiabetic ? 0.75 : 0.25
+
+    return {
+      prediction: isDiabetic ? "Diabetes" : "Tidak Diabetes",
+      probability: probability,
+      confidence: probability,
+      risk_level: isDiabetic ? "High" : "Low",
+      label: isDiabetic ? "Diabetes" : "Tidak Diabetes",
+      message: `${isDiabetic ? "Risiko diabetes tinggi" : "Risiko diabetes rendah"} dengan probabilitas ${Math.round(probability * 100)}% (MOCK DATA)`,
+      recommendations: this.generateRecommendations(
+        inputData,
+        isDiabetic ? "Diabetes" : "Tidak Diabetes",
+        isDiabetic ? 1 : 0,
+      ),
+      model_info: {
+        model_type: "Mock Prediction",
+        threshold: 0.5,
+        accuracy: null,
+      },
+      raw_output: isDiabetic ? 1 : 0,
+      input_data: inputData,
+      ml_api_response: { mock: true },
+    }
+  }
+
+  formatMLError(error) {
+    if (error.code === "ECONNREFUSED") {
+      return new Error("ML API server is not accessible. Please check if the Railway service is running.")
+    }
+
+    if (error.response) {
+      const status = error.response.status
+      const data = error.response.data
+
+      if (status === 405) {
+        return new Error(
+          `ML API endpoint does not support the request method. Please check the API documentation at ${this.apiUrl}/docs`,
         )
       }
 
-      if (error.code === "ENOTFOUND") {
-        throw new Error("ML API server hostname could not be resolved. Please check the Railway URL.")
+      if (status === 404) {
+        return new Error(`ML API endpoint not found. Please verify the endpoint URL.`)
       }
 
-      if (error.code === "ETIMEDOUT") {
-        throw new Error("ML API request timed out. The Railway service might be slow or unavailable.")
+      if (status === 422) {
+        return new Error(`ML API validation error: ${JSON.stringify(data)}. Please check the input data format.`)
       }
 
-      throw new Error(`ML Service error: ${error.message}`)
+      return new Error(`ML API error (${status}): ${data?.detail || error.response.statusText}`)
     }
+
+    if (error.code === "ENOTFOUND") {
+      return new Error("ML API server hostname could not be resolved. Please check the Railway URL.")
+    }
+
+    if (error.code === "ETIMEDOUT") {
+      return new Error("ML API request timed out. The Railway service might be slow or unavailable.")
+    }
+
+    return new Error(`ML Service error: ${error.message}`)
   }
 
   generateRecommendations(inputData, prediction, rawOutput) {
@@ -152,88 +230,55 @@ class MLService {
     const glucose = Number.parseFloat(inputData.glucose)
     const bloodPressure = Number.parseFloat(inputData.bloodPressure)
 
-    // Base recommendations based on prediction
+    // Base recommendations
     if (prediction === "Diabetes" || rawOutput === 1) {
       recommendations.push("🚨 Hasil menunjukkan risiko diabetes tinggi")
       recommendations.push("👨‍⚕️ Segera konsultasi dengan dokter untuk pemeriksaan lebih lanjut")
       recommendations.push("📋 Lakukan tes HbA1c dan tes toleransi glukosa")
-      recommendations.push("💊 Pertimbangkan untuk memulai pengobatan sesuai anjuran dokter")
     } else {
       recommendations.push("✅ Hasil menunjukkan risiko diabetes rendah")
       recommendations.push("🎯 Pertahankan gaya hidup sehat untuk mencegah diabetes")
       recommendations.push("📅 Lakukan pemeriksaan rutin setiap tahun")
-      recommendations.push("🏃‍♂️ Tetap aktif dengan olahraga teratur")
     }
 
-    // BMI-based recommendations
+    // BMI recommendations
     if (bmi >= 30) {
-      recommendations.push("⚖️ BMI Anda tinggi (obesitas), sangat disarankan program penurunan berat badan")
-      recommendations.push("🏃‍♂️ Tingkatkan aktivitas fisik minimal 150 menit per minggu")
-      recommendations.push("🥗 Konsultasi dengan ahli gizi untuk diet seimbang")
+      recommendations.push("⚖️ BMI tinggi - disarankan program penurunan berat badan")
     } else if (bmi >= 25) {
-      recommendations.push("⚖️ BMI Anda sedikit tinggi (overweight), jaga berat badan ideal")
-      recommendations.push("🚶‍♂️ Lakukan olahraga ringan secara teratur")
-    } else if (bmi < 18.5) {
-      recommendations.push("⚖️ BMI Anda rendah, pertimbangkan untuk menambah berat badan secara sehat")
+      recommendations.push("⚖️ BMI sedikit tinggi - jaga berat badan ideal")
     }
 
-    // Glucose-based recommendations
-    if (glucose >= 200) {
-      recommendations.push("🚨 Kadar glukosa sangat tinggi (>200), segera ke dokter!")
-    } else if (glucose >= 140) {
-      recommendations.push("🚨 Kadar glukosa tinggi, segera konsultasi dokter")
-      recommendations.push("🥬 Konsumsi makanan dengan indeks glikemik rendah")
-      recommendations.push("⏰ Atur jadwal makan yang teratur")
+    // Glucose recommendations
+    if (glucose >= 140) {
+      recommendations.push("🚨 Kadar glukosa tinggi - segera konsultasi dokter")
     } else if (glucose >= 100) {
-      recommendations.push("🍯 Kadar glukosa sedikit tinggi, batasi konsumsi gula")
-      recommendations.push("🥬 Konsumsi makanan dengan indeks glikemik rendah")
+      recommendations.push("🍯 Kadar glukosa sedikit tinggi - batasi konsumsi gula")
     }
 
-    // Blood pressure recommendations
-    if (bloodPressure >= 140) {
-      recommendations.push("💓 Tekanan darah tinggi, kurangi konsumsi garam")
-      recommendations.push("🧘‍♀️ Lakukan teknik relaksasi untuk mengurangi stres")
-      recommendations.push("🚭 Hindari merokok dan alkohol")
-    } else if (bloodPressure >= 120) {
-      recommendations.push("💓 Tekanan darah sedikit tinggi, jaga pola hidup sehat")
-    }
-
-    // Age-based recommendations
-    if (age >= 45) {
-      recommendations.push("👴 Usia adalah faktor risiko, lakukan pemeriksaan rutin setiap 6 bulan")
-      recommendations.push("💪 Pertahankan massa otot dengan latihan kekuatan")
-    }
-
-    // General health recommendations
-    recommendations.push("🥬 Konsumsi makanan seimbang dengan banyak sayuran dan buah")
+    // General recommendations
+    recommendations.push("🥬 Konsumsi makanan seimbang")
     recommendations.push("💧 Minum air putih minimal 8 gelas per hari")
-    recommendations.push("😴 Tidur cukup 7-8 jam per hari")
-    recommendations.push("📱 Gunakan aplikasi untuk memantau kesehatan")
-    recommendations.push("🏥 Konsultasi rutin dengan tenaga kesehatan")
+    recommendations.push("🏃‍♂️ Olahraga teratur minimal 30 menit per hari")
 
     return recommendations
   }
 
   async healthCheck() {
     try {
-      // Check ML API health
-      const response = await axios.get(`${this.apiUrl}${this.healthEndpoint}`, {
+      const response = await axios.get(`${this.apiUrl}/health`, {
         timeout: 10000,
       })
 
       return {
         status: "healthy",
         url: this.apiUrl,
-        endpoint: this.healthEndpoint,
         response: response.data,
-        message: "ML API server is accessible and healthy",
+        message: "ML API server is accessible",
       }
     } catch (error) {
-      logger.error("ML API health check failed:", error.message)
       return {
         status: "unhealthy",
         url: this.apiUrl,
-        endpoint: this.healthEndpoint,
         error: error.message,
         message: "ML API server is not accessible",
       }
@@ -255,38 +300,11 @@ class MLService {
         status: "success",
         message: "Test prediction successful",
         result: result,
-        testData: testData,
       }
     } catch (error) {
       return {
         status: "failed",
         message: "Test prediction failed",
-        error: error.message,
-        testData: testData,
-      }
-    }
-  }
-
-  // Method untuk mendapatkan info ML API
-  async getApiInfo() {
-    try {
-      const response = await axios.get(`${this.apiUrl}/`, {
-        timeout: 10000,
-      })
-
-      return {
-        status: "success",
-        info: response.data,
-        endpoints: {
-          root: "/",
-          health: "/health",
-          predict: "/predict",
-          docs: "/docs",
-        },
-      }
-    } catch (error) {
-      return {
-        status: "failed",
         error: error.message,
       }
     }

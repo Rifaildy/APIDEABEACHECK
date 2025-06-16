@@ -64,13 +64,13 @@ const diabetesPredictionValidation = [
     .withMessage("Pregnancies must be between 0-20"),
 ]
 
-// POST /api/prediction/diabetes - Apply auth middleware to get user info
+// POST /api/prediction - Apply auth middleware to get user info
 router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
   try {
-    logger.info("Received prediction request:", {
-      userId: req.user?.id,
-      inputData: req.body,
-    })
+    logger.info("=== PREDICTION REQUEST START ===")
+    logger.info("User ID:", req.user?.id)
+    logger.info("User Email:", req.user?.email)
+    logger.info("Request Body:", req.body)
 
     // Check validation errors
     const errors = validationResult(req)
@@ -97,9 +97,46 @@ router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
 
     logger.info("Sanitized input data:", inputData)
 
-    // Call ML service
-    const result = await mlService.predictDiabetes(inputData)
-    logger.info("Prediction result:", result)
+    // Test ML API connectivity first
+    try {
+      logger.info("Testing ML API connectivity...")
+      const healthCheck = await mlService.healthCheck()
+      logger.info("ML API health check result:", healthCheck)
+
+      if (healthCheck.status !== "healthy") {
+        logger.error("ML API is not healthy:", healthCheck)
+        return res.status(503).json({
+          success: false,
+          message: "ML service is currently unavailable",
+          error: "ML API health check failed",
+          details: healthCheck,
+        })
+      }
+    } catch (healthError) {
+      logger.error("ML API health check failed:", healthError.message)
+      return res.status(503).json({
+        success: false,
+        message: "ML service is currently unavailable",
+        error: "Cannot connect to ML API",
+        details: healthError.message,
+      })
+    }
+
+    // Call ML service for prediction
+    let result
+    try {
+      logger.info("Calling ML service for prediction...")
+      result = await mlService.predictDiabetes(inputData)
+      logger.info("ML service prediction result:", result)
+    } catch (mlError) {
+      logger.error("ML service prediction failed:", mlError.message)
+      return res.status(500).json({
+        success: false,
+        message: "Prediction failed",
+        error: mlError.message,
+        timestamp: new Date().toISOString(),
+      })
+    }
 
     // Save prediction to database with authenticated user ID
     try {
@@ -129,13 +166,13 @@ router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
         locationData: null,
       }
 
-      logger.info("Saving prediction with user ID:", {
+      logger.info("Saving prediction to database:", {
         userId: predictionData.userId,
         userEmail: req.user.email,
       })
 
       const savedPrediction = await PredictionHistory.create(predictionData)
-      logger.info("Prediction saved to database:", {
+      logger.info("Prediction saved successfully:", {
         id: savedPrediction?.id,
         userId: predictionData.userId,
       })
@@ -147,7 +184,10 @@ router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
     } catch (dbError) {
       logger.error("Failed to save prediction to database:", dbError)
       // Continue without failing the request - prediction still works
+      logger.warn("Continuing without saving to database...")
     }
+
+    logger.info("=== PREDICTION REQUEST SUCCESS ===")
 
     // Return successful response
     res.json({
@@ -157,7 +197,9 @@ router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
       timestamp: new Date().toISOString(),
     })
   } catch (error) {
+    logger.error("=== PREDICTION REQUEST FAILED ===")
     logger.error("Prediction error:", error.message)
+    logger.error("Error stack:", error.stack)
 
     // Return error response
     res.status(500).json({
@@ -169,7 +211,7 @@ router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
   }
 })
 
-// Tambahkan route ini setelah route POST
+// GET /api/prediction - Get user prediction history
 router.get("/", auth, async (req, res) => {
   try {
     const { page = 1, limit = 10 } = req.query
@@ -198,7 +240,7 @@ router.get("/", auth, async (req, res) => {
   }
 })
 
-// Tambahkan route untuk mendapatkan prediksi berdasarkan ID
+// GET /api/prediction/:id - Get specific prediction
 router.get("/:id", auth, async (req, res) => {
   try {
     const prediction = await PredictionHistory.findById(req.params.id)
@@ -233,46 +275,33 @@ router.get("/:id", auth, async (req, res) => {
   }
 })
 
-// GET /api/prediction/health - Health check for ML service
-router.get("/health", async (req, res) => {
+// GET /api/prediction/test/ml - Test ML API connectivity
+router.get("/test/ml", async (req, res) => {
   try {
-    const healthStatus = await mlService.healthCheck()
+    logger.info("Testing ML API...")
 
-    res.json({
-      success: true,
-      message: "Health check completed",
-      data: healthStatus,
-      timestamp: new Date().toISOString(),
-    })
-  } catch (error) {
-    logger.error("Health check error:", error.message)
+    // Test health check
+    const healthResult = await mlService.healthCheck()
+    logger.info("Health check result:", healthResult)
 
-    res.status(500).json({
-      success: false,
-      message: "Health check failed",
-      error: error.message,
-      timestamp: new Date().toISOString(),
-    })
-  }
-})
-
-// GET /api/prediction/test - Test prediction with sample data
-router.get("/test", async (req, res) => {
-  try {
+    // Test prediction
     const testResult = await mlService.testPrediction()
+    logger.info("Test prediction result:", testResult)
 
     res.json({
       success: true,
-      message: "Test prediction completed",
-      data: testResult,
+      message: "ML API test completed",
+      data: {
+        health: healthResult,
+        testPrediction: testResult,
+      },
       timestamp: new Date().toISOString(),
     })
   } catch (error) {
-    logger.error("Test prediction error:", error.message)
-
+    logger.error("ML API test failed:", error.message)
     res.status(500).json({
       success: false,
-      message: "Test prediction failed",
+      message: "ML API test failed",
       error: error.message,
       timestamp: new Date().toISOString(),
     })
