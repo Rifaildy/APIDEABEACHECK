@@ -3,7 +3,7 @@ const logger = require("../utils/logger")
 
 class MLService {
   constructor() {
-    this.apiUrl = process.env.ML_API_URL || "http://localhost:8000"
+    this.apiUrl = process.env.ML_API_URL || "http://capstone-diabeacheck.up.railway.app"
     this.timeout = 30000 // 30 seconds
   }
 

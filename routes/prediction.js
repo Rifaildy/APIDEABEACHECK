@@ -65,7 +65,7 @@ const diabetesPredictionValidation = [
 ]
 
 // POST /api/prediction/diabetes - Apply auth middleware to get user info
-router.post("/diabetes", auth, diabetesPredictionValidation, async (req, res) => {
+router.post("/", auth, diabetesPredictionValidation, async (req, res) => {
   try {
     logger.info("Received prediction request:", {
       userId: req.user?.id,
@@ -165,6 +165,70 @@ router.post("/diabetes", auth, diabetesPredictionValidation, async (req, res) =>
       message: "Prediction failed",
       error: error.message,
       timestamp: new Date().toISOString(),
+    })
+  }
+})
+
+// Tambahkan route ini setelah route POST
+router.get("/", auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 10 } = req.query
+    const predictions = await PredictionHistory.findByUserId(req.user.id, {
+      limit: Number.parseInt(limit),
+      offset: (Number.parseInt(page) - 1) * Number.parseInt(limit),
+    })
+
+    res.json({
+      success: true,
+      message: "Predictions retrieved successfully",
+      data: predictions,
+      pagination: {
+        page: Number.parseInt(page),
+        limit: Number.parseInt(limit),
+        total: predictions.length,
+      },
+    })
+  } catch (error) {
+    logger.error("Get predictions error:", error.message)
+    res.status(500).json({
+      success: false,
+      message: "Failed to get predictions",
+      error: error.message,
+    })
+  }
+})
+
+// Tambahkan route untuk mendapatkan prediksi berdasarkan ID
+router.get("/:id", auth, async (req, res) => {
+  try {
+    const prediction = await PredictionHistory.findById(req.params.id)
+
+    if (!prediction) {
+      return res.status(404).json({
+        success: false,
+        message: "Prediction not found",
+      })
+    }
+
+    // Pastikan user hanya bisa akses prediksi miliknya sendiri
+    if (prediction.userId !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied",
+      })
+    }
+
+    res.json({
+      success: true,
+      message: "Prediction retrieved successfully",
+      data: prediction,
+    })
+  } catch (error) {
+    logger.error("Get prediction by ID error:", error.message)
+    res.status(500).json({
+      success: false,
+      message: "Failed to get prediction",
+      error: error.message,
     })
   }
 })
